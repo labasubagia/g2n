@@ -103,6 +103,20 @@ pub async fn run_sync(
     }
     let total = images.len();
 
+    let use_bar = std::io::stderr().is_terminal();
+    let mp = use_bar.then(MultiProgress::new);
+    // Print a settled line above the bar (TTY) or via tracing (pipes/tests).
+    let report = |line: String| {
+        if let Some(mp) = &mp {
+            let _ = mp.println(line);
+        } else {
+            tracing::info!("{line}");
+        }
+    };
+
+    report(format!("🔍 found {total} images in Drive"));
+    report("🔎 Fetching existing Notion pages for dedup…".to_owned());
+
     // One-time bulk dedup: fetch existing titles once instead of one query per
     // image (data-source queries are throttled to ~3 req/s).
     let existing = notion.list_existing_names().await?;
@@ -113,35 +127,22 @@ pub async fn run_sync(
     let pending_len = pending.len();
     let skipped = total - pending_len;
 
-    let use_bar = std::io::stderr().is_terminal();
-    let mp = use_bar.then(MultiProgress::new);
     let bar = mp.as_ref().map(|mp| {
-        let bar = mp.add(ProgressBar::new(pending.len() as u64));
+        let bar = mp.add(ProgressBar::new(pending_len as u64));
         bar.set_style(
             ProgressStyle::with_template("{bar:34} {pos}/{len} {msg}")
                 .unwrap()
                 .progress_chars("=> "),
         );
         bar.set_message(format!(
-            "🔍 {skipped}/{total} already in Notion, {} to upload",
-            pending.len()
+            "🔍 {skipped}/{total} already in Notion, {pending_len} to upload"
         ));
         bar
     });
 
-    // Print a settled line above the bar (TTY) or via tracing (pipes/tests).
-    let report = |line: String| {
-        if let Some(mp) = &mp {
-            let _ = mp.println(line);
-        } else {
-            tracing::info!("{line}");
-        }
-    };
     report(format!(
-        "🔍 found {total} images, {skipped} already exist, {} to upload",
-        pending.len()
+        "🔍 {skipped}/{total} already in Notion, {pending_len} to upload"
     ));
-
     let limiter = Arc::new(RateLimiter::new(config.notion.requests_per_second));
     let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
     let downloaded_dir = options.download_dir.clone();
