@@ -60,43 +60,48 @@ pub async fn run_sync(
                 .unwrap()
                 .progress_chars("=> "),
         );
-        bar.set_message(format!("found {total} images in Drive"));
+        bar.set_message(format!("🔍 found {total} images in Drive"));
         bar
     });
 
-    // Report a progress line above the bar (TTY) or via tracing (pipes/tests).
-    let notify = |msg: String| {
+    // Print a settled line above the bar (TTY) or via tracing (pipes/tests).
+    let report = |line: String| {
         if let Some(mp) = &mp {
-            let _ = mp.println(msg);
+            let _ = mp.println(line);
         } else {
-            tracing::info!("{msg}");
+            tracing::info!("{line}");
         }
     };
 
     let mut uploaded = 0usize;
     let mut skipped = 0usize;
     for image in &images {
-        notify(format!("processing: {}", image.name));
+        if let Some(bar) = &bar {
+            bar.set_message(format!("⏳ {}", image.name));
+        }
         if notion.page_exists(&image.name).await? {
-            notify(format!("exists in Notion; skipping: {}", image.name));
+            report(format!("⏭️ {}", image.name));
             skipped += 1;
         } else {
-            notify(format!("downloading from Drive: {}", image.name));
+            if let Some(bar) = &bar {
+                bar.set_message(format!("🔽 {}", image.name));
+            }
             tokio::fs::create_dir_all(&options.download_dir).await?;
             let file_path = options.download_dir.join(&image.name);
             let bytes = drive.download(&image.id, &image.name).await?;
-            notify(format!(
-                "downloaded: {} ({} bytes)",
-                image.name,
-                bytes.len()
-            ));
-            tokio::fs::write(&file_path, bytes).await?;
-            notify(format!("uploading to Notion: {}", image.name));
+            let sized = format!("{} ({} bytes)", image.name, bytes.len());
+            if let Some(bar) = &bar {
+                bar.set_message(format!("💾 {sized}"));
+            }
+            tokio::fs::write(&file_path, &bytes).await?;
+            if let Some(bar) = &bar {
+                bar.set_message(format!("🔼 {sized}"));
+            }
             notion
                 .add_page(&file_path, &image.prompt, image.created_time.as_deref())
                 .await?;
             uploaded += 1;
-            notify(format!("uploaded: {}", image.name));
+            report(format!("✅ {sized}"));
         }
         if let Some(bar) = &bar {
             bar.inc(1);
