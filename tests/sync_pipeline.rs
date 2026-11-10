@@ -35,7 +35,10 @@ struct FakeNotion {
 
 #[async_trait]
 impl NotionApi for FakeNotion {
-    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
+    async fn list_existing_names(
+        &self,
+        _on_page: &(dyn Fn(usize) + Send + Sync),
+    ) -> Result<HashSet<String>, NotionError> {
         Ok(self.exists.lock().unwrap().iter().cloned().collect())
     }
     async fn add_page(

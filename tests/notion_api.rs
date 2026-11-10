@@ -24,7 +24,7 @@ async fn list_existing_names_returns_titles() {
         database_id: "db1".into(),
     };
     let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
-    let names = client.list_existing_names().await.unwrap();
+    let names = client.list_existing_names(&|_| {}).await.unwrap();
     assert!(names.contains("a.png"));
     assert!(names.contains("b.png"));
     assert_eq!(names.len(), 2);
@@ -67,7 +67,7 @@ async fn list_existing_names_paginates() {
         database_id: "db1".into(),
     };
     let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
-    let names = client.list_existing_names().await.unwrap();
+    let names = client.list_existing_names(&|_| {}).await.unwrap();
     assert_eq!(names.len(), 2);
 
     let bodies = bodies.lock().unwrap();

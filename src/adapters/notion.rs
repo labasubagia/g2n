@@ -38,7 +38,10 @@ pub struct NotionContext {
 #[async_trait]
 pub trait NotionApi: Send + Sync {
     /// Return the set of page titles already present in the database.
-    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError>;
+    async fn list_existing_names(
+        &self,
+        on_page: &(dyn Fn(usize) + Send + Sync),
+    ) -> Result<HashSet<String>, NotionError>;
     async fn add_page(
         &self,
         file_path: &Path,
@@ -86,7 +89,10 @@ impl NotionClient {
     }
 
     /// Fetch all page titles in the database (paginated, 100/page).
-    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
+    async fn list_existing_names(
+        &self,
+        on_page: &(dyn Fn(usize) + Send + Sync),
+    ) -> Result<HashSet<String>, NotionError> {
         let url = format!("{}/v1/databases/{}/query", self.base_url, self.database_id);
         let mut names = HashSet::new();
         let mut start_cursor: Option<String> = None;
@@ -119,6 +125,7 @@ impl NotionClient {
                     names.insert(name.to_owned());
                 }
             }
+            on_page(names.len());
             match data.get("has_more").and_then(Value::as_bool) {
                 Some(true) => {
                     start_cursor = data
@@ -201,8 +208,11 @@ impl NotionClient {
 
 #[async_trait]
 impl NotionApi for NotionClient {
-    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
-        self.list_existing_names().await
+    async fn list_existing_names(
+        &self,
+        on_page: &(dyn Fn(usize) + Send + Sync),
+    ) -> Result<HashSet<String>, NotionError> {
+        self.list_existing_names(on_page).await
     }
 
     async fn add_page(

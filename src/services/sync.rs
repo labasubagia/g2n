@@ -115,11 +115,36 @@ pub async fn run_sync(
     };
 
     report(format!("🔍 found {total} images in Drive"));
+
+    // Spinner during the one-time bulk dedup fetch so it never looks hung.
+    let fetch_bar = mp.as_ref().map(|mp| {
+        let bar = mp.add(ProgressBar::new_spinner());
+        bar.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+        );
+        bar.set_message("🔎 Fetching existing Notion pages for dedup…".to_owned());
+        bar
+    });
     report("🔎 Fetching existing Notion pages for dedup…".to_owned());
 
     // One-time bulk dedup: fetch existing titles once instead of one query per
     // image (data-source queries are throttled to ~3 req/s).
-    let existing = notion.list_existing_names().await?;
+    let existing = notion
+        .list_existing_names(&|found| {
+            if let Some(bar) = &fetch_bar {
+                bar.set_message(format!(
+                    "🔎 Fetching existing Notion pages… {found} collected"
+                ));
+            }
+        })
+        .await?;
+
+    if let (Some(mp), Some(bar)) = (&mp, &fetch_bar) {
+        mp.remove(bar);
+    }
+
     let pending: Vec<_> = images
         .iter()
         .filter(|image| !existing.contains(&image.name))
