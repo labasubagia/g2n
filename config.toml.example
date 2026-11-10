@@ -1,0 +1,19 @@
+# g2n configuration
+
+# Google Drive OAuth client (from Google Cloud Console → Credentials → OAuth client ID → Desktop app).
+[google]
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret = "your-client-secret"
+# The Drive folder to scan for images (the folder ID from its URL).
+folder_id = "your-drive-folder-id"
+scope = "https://www.googleapis.com/auth/drive.readonly"
+
+# Notion integration token + database shared with that integration.
+[notion]
+api_key = "secret_xxx"
+database_id = "your-notion-database-id"
+
+# The database must have these properties:
+#   Name       — type Title
+#   Image      — type Files
+#   Created Time — type Date (optional; set when present)

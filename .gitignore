@@ -1,0 +1,8 @@
+# Secrets — never commit.
+config.toml
+
+# Build artifacts.
+/target
+
+# Downloaded images (runtime output).
+/images
