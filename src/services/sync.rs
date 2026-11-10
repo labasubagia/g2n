@@ -2,8 +2,12 @@
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tokio::sync::Semaphore;
 
 use crate::adapters::auth::AuthError;
 use crate::adapters::drive::DriveError;
@@ -30,6 +34,7 @@ pub enum SyncError {
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
     pub download_dir: PathBuf,
+    pub concurrency: usize,
 }
 
 pub fn load_app_config(path: &Option<PathBuf>) -> Result<AppConfig, SyncError> {
@@ -37,6 +42,53 @@ pub fn load_app_config(path: &Option<PathBuf>) -> Result<AppConfig, SyncError> {
         Some(p) => crate::config::load_config_from(p)?,
         None => crate::config::load_config(None)?,
     })
+}
+
+/// A simple token-bucket rate limiter used to pace Notion uploads so the
+/// connection stays under its per-second request budget.
+struct RateLimiter {
+    rate_per_sec: f64,
+    state: tokio::sync::Mutex<LimiterState>,
+}
+
+struct LimiterState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new(rate_per_sec: f64) -> Self {
+        Self {
+            rate_per_sec: rate_per_sec.max(f64::EPSILON),
+            state: tokio::sync::Mutex::new(LimiterState {
+                tokens: rate_per_sec.max(f64::EPSILON),
+                last_refill: Instant::now(),
+            }),
+        }
+    }
+
+    /// Reserve `n` tokens, sleeping until the budget allows.
+    async fn acquire(&self, n: u32) {
+        let n = n as f64;
+        let wait = {
+            let mut s = self.state.lock().await;
+            let now = Instant::now();
+            let elapsed = now.duration_since(s.last_refill).as_secs_f64();
+            s.tokens = (s.tokens + elapsed * self.rate_per_sec).min(self.rate_per_sec * 2.0);
+            s.last_refill = now;
+            if s.tokens >= n {
+                s.tokens -= n;
+                None
+            } else {
+                let deficit = n - s.tokens;
+                s.tokens = 0.0;
+                Some(Duration::from_secs_f64(deficit / self.rate_per_sec))
+            }
+        };
+        if let Some(wait) = wait {
+            tokio::time::sleep(wait).await;
+        }
+    }
 }
 
 pub async fn run_sync(
@@ -51,16 +103,29 @@ pub async fn run_sync(
     }
     let total = images.len();
 
+    // One-time bulk dedup: fetch existing titles once instead of one query per
+    // image (data-source queries are throttled to ~3 req/s).
+    let existing = notion.list_existing_names().await?;
+    let pending: Vec<_> = images
+        .iter()
+        .filter(|image| !existing.contains(&image.name))
+        .collect();
+    let pending_len = pending.len();
+    let skipped = total - pending_len;
+
     let use_bar = std::io::stderr().is_terminal();
     let mp = use_bar.then(MultiProgress::new);
     let bar = mp.as_ref().map(|mp| {
-        let bar = mp.add(ProgressBar::new(total as u64));
+        let bar = mp.add(ProgressBar::new(pending.len() as u64));
         bar.set_style(
             ProgressStyle::with_template("{bar:34} {pos}/{len} {msg}")
                 .unwrap()
                 .progress_chars("=> "),
         );
-        bar.set_message(format!("🔍 found {total} images in Drive"));
+        bar.set_message(format!(
+            "🔍 {skipped}/{total} already in Notion, {} to upload",
+            pending.len()
+        ));
         bar
     });
 
@@ -72,41 +137,58 @@ pub async fn run_sync(
             tracing::info!("{line}");
         }
     };
+    report(format!(
+        "🔍 found {total} images, {skipped} already exist, {} to upload",
+        pending.len()
+    ));
 
-    let mut uploaded = 0usize;
-    let mut skipped = 0usize;
-    for image in &images {
-        if let Some(bar) = &bar {
-            bar.set_message(format!("⏳ {}", image.name));
-        }
-        if notion.page_exists(&image.name).await? {
-            report(format!("⏭️ {}", image.name));
-            skipped += 1;
-        } else {
-            if let Some(bar) = &bar {
-                bar.set_message(format!("🔽 {}", image.name));
+    let limiter = Arc::new(RateLimiter::new(config.notion.requests_per_second));
+    let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
+    let downloaded_dir = options.download_dir.clone();
+
+    let results: Vec<Result<(), SyncError>> = futures_util::stream::iter(pending)
+        .map(|image| {
+            let (limiter, semaphore) = (limiter.clone(), semaphore.clone());
+            let (mp, bar) = (mp.clone(), bar.clone());
+            let downloaded_dir = downloaded_dir.clone();
+            async move {
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .map_err(|_| SyncError::Io(std::io::Error::other("semaphore closed")))?;
+                if let Some(bar) = &bar {
+                    bar.set_message(format!("⏳ {}", image.name));
+                }
+                tokio::fs::create_dir_all(&downloaded_dir).await?;
+                let file_path = downloaded_dir.join(&image.name);
+                let bytes = drive.download(&image.id, &image.name).await?;
+                let sized = format!("{} ({} bytes)", image.name, bytes.len());
+                if let Some(bar) = &bar {
+                    bar.set_message(format!("💾 {sized}"));
+                }
+                tokio::fs::write(&file_path, &bytes).await?;
+                // Each add_page is 3 API requests (create upload, send, create page).
+                limiter.acquire(3).await;
+                notion
+                    .add_page(&file_path, &image.prompt, image.created_time.as_deref())
+                    .await?;
+                if let Some(mp) = &mp {
+                    let _ = mp.println(format!("✅ {sized}"));
+                } else {
+                    tracing::info!("✅ {sized}");
+                }
+                if let Some(bar) = &bar {
+                    bar.inc(1);
+                }
+                Ok(())
             }
-            tokio::fs::create_dir_all(&options.download_dir).await?;
-            let file_path = options.download_dir.join(&image.name);
-            let bytes = drive.download(&image.id, &image.name).await?;
-            let sized = format!("{} ({} bytes)", image.name, bytes.len());
-            if let Some(bar) = &bar {
-                bar.set_message(format!("💾 {sized}"));
-            }
-            tokio::fs::write(&file_path, &bytes).await?;
-            if let Some(bar) = &bar {
-                bar.set_message(format!("🔼 {sized}"));
-            }
-            notion
-                .add_page(&file_path, &image.prompt, image.created_time.as_deref())
-                .await?;
-            uploaded += 1;
-            report(format!("✅ {sized}"));
-        }
-        if let Some(bar) = &bar {
-            bar.inc(1);
-        }
-    }
+        })
+        .buffer_unordered(options.concurrency.max(1))
+        .collect()
+        .await;
+
+    let failures: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+    let uploaded = pending_len - failures.len();
 
     if let Some(bar) = &bar {
         bar.finish_with_message(format!(
@@ -115,5 +197,9 @@ pub async fn run_sync(
     } else {
         tracing::info!(uploaded, skipped, "sync finished");
     }
-    Ok(())
+
+    match failures.into_iter().next() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }

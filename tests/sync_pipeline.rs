@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -34,8 +35,8 @@ struct FakeNotion {
 
 #[async_trait]
 impl NotionApi for FakeNotion {
-    async fn page_exists(&self, name: &str) -> Result<bool, NotionError> {
-        Ok(self.exists.lock().unwrap().iter().any(|n| n == name))
+    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
+        Ok(self.exists.lock().unwrap().iter().cloned().collect())
     }
     async fn add_page(
         &self,
@@ -63,6 +64,7 @@ fn config() -> AppConfig {
         notion: NotionConfig {
             api_key: "k".into(),
             database_id: "db1".into(),
+            requests_per_second: 3.0,
         },
     }
 }
@@ -93,6 +95,7 @@ async fn sync_uploads_new_and_skips_existing() {
     let dir = tempfile::tempdir().unwrap();
     let options = SyncOptions {
         download_dir: dir.path().to_owned(),
+        concurrency: 4,
     };
 
     run_sync(&options, &config(), &drive, &notion)
@@ -116,6 +119,7 @@ async fn sync_errors_when_no_images() {
     let dir = tempfile::tempdir().unwrap();
     let options = SyncOptions {
         download_dir: dir.path().to_owned(),
+        concurrency: 4,
     };
     let err = run_sync(&options, &config(), &drive, &notion)
         .await

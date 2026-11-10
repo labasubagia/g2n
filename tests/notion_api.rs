@@ -5,12 +5,16 @@ use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn page_exists_queries_name() {
+async fn list_existing_names_returns_titles() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path_regex("^/v1/databases/.+/query$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "results": [{"id": "p1"}]
+            "results": [
+                {"properties": {"Name": {"title": [{"text": {"content": "a.png"}}]}}},
+                {"properties": {"Name": {"title": [{"text": {"content": "b.png"}}]}}}
+            ],
+            "has_more": false
         })))
         .mount(&server)
         .await;
@@ -20,9 +24,57 @@ async fn page_exists_queries_name() {
         database_id: "db1".into(),
     };
     let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
-    assert!(client.page_exists("a.png").await.unwrap());
+    let names = client.list_existing_names().await.unwrap();
+    assert!(names.contains("a.png"));
+    assert!(names.contains("b.png"));
+    assert_eq!(names.len(), 2);
 }
+#[tokio::test]
+async fn list_existing_names_paginates() {
+    let server = MockServer::start().await;
+    let bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(vec![]));
+    Mock::given(method("POST"))
+        .and(path_regex("^/v1/databases/.+/query$"))
+        .respond_with({
+            let bodies = Arc::clone(&bodies);
+            move |req: &wiremock::Request| {
+                let mut bodies = bodies.lock().unwrap();
+                bodies.push(serde_json::from_slice(&req.body).unwrap());
+                if bodies.len() == 1 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "results": [
+                            {"properties": {"Name": {"title": [{"text": {"content": "a.png"}}]}}}
+                        ],
+                        "has_more": true,
+                        "next_cursor": "cur1"
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "results": [
+                            {"properties": {"Name": {"title": [{"text": {"content": "b.png"}}]}}}
+                        ],
+                        "has_more": false
+                    }))
+                }
+            }
+        })
+        .mount(&server)
+        .await;
 
+    let ctx = NotionContext {
+        api_key: "k".into(),
+        database_id: "db1".into(),
+    };
+    let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
+    let names = client.list_existing_names().await.unwrap();
+    assert_eq!(names.len(), 2);
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0].get("start_cursor").is_none());
+    assert_eq!(bodies[1]["start_cursor"], "cur1");
+}
 #[tokio::test]
 async fn add_page_uploads_and_creates_page_with_created_time() {
     let server = MockServer::start().await;

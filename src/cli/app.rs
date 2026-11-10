@@ -36,6 +36,9 @@ pub struct SyncArgs {
     /// Authorize via browser when no token is cached (default: true).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub interactive: bool,
+    /// Max concurrent downloads/uploads (default: 4).
+    #[arg(long, default_value_t = 4)]
+    pub concurrency: usize,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -57,6 +60,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 download_dir: args
                     .download_dir
                     .unwrap_or_else(|| crate::shared::constants::data_dir().join("images")),
+                concurrency: args.concurrency,
             };
             run_sync(&options, &config, &drive, &notion).await?;
             Ok(())

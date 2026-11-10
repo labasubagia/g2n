@@ -21,6 +21,14 @@ fn default_scope() -> String {
 pub struct NotionConfig {
     pub api_key: String,
     pub database_id: String,
+    /// Notion connection request budget per second (default 3, safe for
+    /// non-Business plans; Business/Enterprise allow 10). Used to pace uploads.
+    #[serde(default = "default_requests_per_second")]
+    pub requests_per_second: f64,
+}
+
+fn default_requests_per_second() -> f64 {
+    3.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

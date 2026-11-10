@@ -12,6 +12,7 @@ scope = "https://www.googleapis.com/auth/drive.readonly"
 [notion]
 api_key = "secret_xxx"
 database_id = "your-notion-database-id"
+requests_per_second = 3.0
 
 # The database must have these properties:
 #   Name       — type Title

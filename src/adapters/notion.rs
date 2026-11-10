@@ -1,5 +1,6 @@
 //! Notion API adapter: database page creation and duplicate checks.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -36,7 +37,8 @@ pub struct NotionContext {
 
 #[async_trait]
 pub trait NotionApi: Send + Sync {
-    async fn page_exists(&self, name: &str) -> Result<bool, NotionError>;
+    /// Return the set of page titles already present in the database.
+    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError>;
     async fn add_page(
         &self,
         file_path: &Path,
@@ -83,33 +85,52 @@ impl NotionClient {
         })
     }
 
-    async fn query_name(&self, name: &str) -> Result<bool, NotionError> {
+    /// Fetch all page titles in the database (paginated, 100/page).
+    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
         let url = format!("{}/v1/databases/{}/query", self.base_url, self.database_id);
-        let payload = json!({
-            "filter": {
-                "property": "Name",
-                "title": {"equals": name}
+        let mut names = HashSet::new();
+        let mut start_cursor: Option<String> = None;
+        loop {
+            let mut payload = json!({"page_size": 100});
+            if let Some(cursor) = start_cursor.as_ref() {
+                payload["start_cursor"] = Value::String(cursor.clone());
             }
-        });
-        let data = retry_http(|| async {
-            let response = self
-                .http
-                .post(&url)
-                .headers(self.headers.clone())
-                .json(&payload)
-                .send()
-                .await?;
-            let response = ensure_success(response, Method::POST).await?;
-            Ok(response.json::<Value>().await?)
-        })
-        .await?;
-        let results = data
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or_else(|| NotionError::InvalidResponse("missing results array".into()))?;
-        Ok(!results.is_empty())
+            let data = retry_http(|| async {
+                let response = self
+                    .http
+                    .post(&url)
+                    .headers(self.headers.clone())
+                    .json(&payload)
+                    .send()
+                    .await?;
+                let response = ensure_success(response, Method::POST).await?;
+                Ok(response.json::<Value>().await?)
+            })
+            .await?;
+            let results = data
+                .get("results")
+                .and_then(Value::as_array)
+                .ok_or_else(|| NotionError::InvalidResponse("missing results array".into()))?;
+            for page in results {
+                if let Some(name) = page
+                    .pointer("/properties/Name/title/0/text/content")
+                    .and_then(Value::as_str)
+                {
+                    names.insert(name.to_owned());
+                }
+            }
+            match data.get("has_more").and_then(Value::as_bool) {
+                Some(true) => {
+                    start_cursor = data
+                        .get("next_cursor")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                _ => break,
+            }
+        }
+        Ok(names)
     }
-
     async fn create_upload(
         &self,
         file_path: &Path,
@@ -180,8 +201,8 @@ impl NotionClient {
 
 #[async_trait]
 impl NotionApi for NotionClient {
-    async fn page_exists(&self, name: &str) -> Result<bool, NotionError> {
-        self.query_name(name).await
+    async fn list_existing_names(&self) -> Result<HashSet<String>, NotionError> {
+        self.list_existing_names().await
     }
 
     async fn add_page(
