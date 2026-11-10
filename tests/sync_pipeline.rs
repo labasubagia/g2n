@@ -35,11 +35,17 @@ struct FakeNotion {
 
 #[async_trait]
 impl NotionApi for FakeNotion {
-    async fn list_existing_names(
+    async fn find_existing_names(
         &self,
+        names: &[&str],
         _on_page: &(dyn Fn(usize) + Send + Sync),
     ) -> Result<HashSet<String>, NotionError> {
-        Ok(self.exists.lock().unwrap().iter().cloned().collect())
+        let existing: HashSet<String> = self.exists.lock().unwrap().iter().cloned().collect();
+        Ok(names
+            .iter()
+            .filter(|n| existing.contains(**n))
+            .map(|s| s.to_string())
+            .collect())
     }
     async fn add_page(
         &self,

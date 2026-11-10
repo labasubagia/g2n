@@ -37,9 +37,10 @@ pub struct NotionContext {
 
 #[async_trait]
 pub trait NotionApi: Send + Sync {
-    /// Return the set of page titles already present in the database.
-    async fn list_existing_names(
+    /// Which of `names` already exist as page titles (chunked OR, ≤100/req).
+    async fn find_existing_names(
         &self,
+        names: &[&str],
         on_page: &(dyn Fn(usize) + Send + Sync),
     ) -> Result<HashSet<String>, NotionError>;
     async fn add_page(
@@ -88,55 +89,68 @@ impl NotionClient {
         })
     }
 
-    /// Fetch all page titles in the database (paginated, 100/page).
-    async fn list_existing_names(
+    /// Which of `names` already exist as page titles. Notion caps compound
+    /// `or` filters at 100 conditions, so query in chunks of 100 (paginated).
+    async fn find_existing_names(
         &self,
+        names: &[&str],
         on_page: &(dyn Fn(usize) + Send + Sync),
     ) -> Result<HashSet<String>, NotionError> {
+        if names.is_empty() {
+            return Ok(HashSet::new());
+        }
         let url = format!("{}/v1/databases/{}/query", self.base_url, self.database_id);
-        let mut names = HashSet::new();
-        let mut start_cursor: Option<String> = None;
-        loop {
-            let mut payload = json!({"page_size": 100});
-            if let Some(cursor) = start_cursor.as_ref() {
-                payload["start_cursor"] = Value::String(cursor.clone());
-            }
-            let data = retry_http(|| async {
-                let response = self
-                    .http
-                    .post(&url)
-                    .headers(self.headers.clone())
-                    .json(&payload)
-                    .send()
-                    .await?;
-                let response = ensure_success(response, Method::POST).await?;
-                Ok(response.json::<Value>().await?)
-            })
-            .await?;
-            let results = data
-                .get("results")
-                .and_then(Value::as_array)
-                .ok_or_else(|| NotionError::InvalidResponse("missing results array".into()))?;
-            for page in results {
-                if let Some(name) = page
-                    .pointer("/properties/Name/title/0/text/content")
-                    .and_then(Value::as_str)
-                {
-                    names.insert(name.to_owned());
+        let mut found = HashSet::new();
+        for chunk in names.chunks(100) {
+            let filter = json!({
+                "or": chunk.iter().map(|name| json!({
+                    "property": "Name",
+                    "title": { "equals": name }
+                })).collect::<Vec<_>>()
+            });
+            let mut start_cursor: Option<String> = None;
+            loop {
+                let mut payload = json!({"filter": filter, "page_size": 100});
+                if let Some(cursor) = start_cursor.as_ref() {
+                    payload["start_cursor"] = Value::String(cursor.clone());
                 }
-            }
-            on_page(names.len());
-            match data.get("has_more").and_then(Value::as_bool) {
-                Some(true) => {
-                    start_cursor = data
-                        .get("next_cursor")
+                let data = retry_http(|| async {
+                    let response = self
+                        .http
+                        .post(&url)
+                        .headers(self.headers.clone())
+                        .json(&payload)
+                        .send()
+                        .await?;
+                    let response = ensure_success(response, Method::POST).await?;
+                    Ok(response.json::<Value>().await?)
+                })
+                .await?;
+                let results = data
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| NotionError::InvalidResponse("missing results array".into()))?;
+                for page in results {
+                    if let Some(name) = page
+                        .pointer("/properties/Name/title/0/text/content")
                         .and_then(Value::as_str)
-                        .map(str::to_owned);
+                    {
+                        found.insert(name.to_owned());
+                    }
                 }
-                _ => break,
+                on_page(found.len());
+                match data.get("has_more").and_then(Value::as_bool) {
+                    Some(true) => {
+                        start_cursor = data
+                            .get("next_cursor")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                    _ => break,
+                }
             }
         }
-        Ok(names)
+        Ok(found)
     }
     async fn create_upload(
         &self,
@@ -208,11 +222,12 @@ impl NotionClient {
 
 #[async_trait]
 impl NotionApi for NotionClient {
-    async fn list_existing_names(
+    async fn find_existing_names(
         &self,
+        names: &[&str],
         on_page: &(dyn Fn(usize) + Send + Sync),
     ) -> Result<HashSet<String>, NotionError> {
-        self.list_existing_names(on_page).await
+        self.find_existing_names(names, on_page).await
     }
 
     async fn add_page(

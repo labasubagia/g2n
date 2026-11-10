@@ -129,13 +129,14 @@ pub async fn run_sync(
     });
     report("🔎 Fetching existing Notion pages for dedup…".to_owned());
 
-    // One-time bulk dedup: fetch existing titles once instead of one query per
-    // image (data-source queries are throttled to ~3 req/s).
+    // One-time bulk dedup: ask Notion which of our Drive titles already exist
+    // (chunked OR queries; query limit ~3 req/s handled by retry/pacing).
+    let drive_names: Vec<&str> = images.iter().map(|i| i.name.as_str()).collect();
     let existing = notion
-        .list_existing_names(&|found| {
+        .find_existing_names(&drive_names, &|found| {
             if let Some(bar) = &fetch_bar {
                 bar.set_message(format!(
-                    "🔎 Fetching existing Notion pages… {found} collected"
+                    "🔎 Checking existing Notion pages… {found} duplicates found"
                 ));
             }
         })

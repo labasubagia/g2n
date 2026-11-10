@@ -5,17 +5,28 @@ use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn list_existing_names_returns_titles() {
+async fn find_existing_names_returns_only_matches() {
     let server = MockServer::start().await;
+    let bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(vec![]));
     Mock::given(method("POST"))
         .and(path_regex("^/v1/databases/.+/query$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "results": [
-                {"properties": {"Name": {"title": [{"text": {"content": "a.png"}}]}}},
-                {"properties": {"Name": {"title": [{"text": {"content": "b.png"}}]}}}
-            ],
-            "has_more": false
-        })))
+        .respond_with({
+            let bodies = Arc::clone(&bodies);
+            move |req: &wiremock::Request| {
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&req.body).unwrap());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [
+                        {"properties": {"Name": {"title": [{"text": {"content": "a.png"}}]}}},
+                        {"properties": {"Name": {"title": [{"text": {"content": "b.png"}}]}}}
+                    ],
+                    "has_more": false
+                }))
+            }
+        })
         .mount(&server)
         .await;
 
@@ -24,13 +35,65 @@ async fn list_existing_names_returns_titles() {
         database_id: "db1".into(),
     };
     let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
-    let names = client.list_existing_names(&|_| {}).await.unwrap();
-    assert!(names.contains("a.png"));
-    assert!(names.contains("b.png"));
-    assert_eq!(names.len(), 2);
+    let names = client
+        .find_existing_names(&["a.png", "b.png", "nope.png"], &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        ["a.png", "b.png"].into_iter().map(str::to_owned).collect()
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let or = bodies[0]["filter"]["or"].as_array().unwrap();
+    assert_eq!(or.len(), 3);
+    assert_eq!(
+        or[0],
+        serde_json::json!({"property": "Name", "title": {"equals": "a.png"}})
+    );
 }
+
 #[tokio::test]
-async fn list_existing_names_paginates() {
+async fn find_existing_names_chunks_at_100() {
+    let server = MockServer::start().await;
+    let bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(vec![]));
+    Mock::given(method("POST"))
+        .and(path_regex("^/v1/databases/.+/query$"))
+        .respond_with({
+            let bodies = Arc::clone(&bodies);
+            move |req: &wiremock::Request| {
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&req.body).unwrap());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [],
+                    "has_more": false
+                }))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let ctx = NotionContext {
+        api_key: "k".into(),
+        database_id: "db1".into(),
+    };
+    let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
+    let many: Vec<String> = (0..250).map(|i| format!("img_{i}.jpeg")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    client.find_existing_names(&refs, &|_| {}).await.unwrap();
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[0]["filter"]["or"].as_array().unwrap().len(), 100);
+    assert_eq!(bodies[1]["filter"]["or"].as_array().unwrap().len(), 100);
+    assert_eq!(bodies[2]["filter"]["or"].as_array().unwrap().len(), 50);
+}
+
+#[tokio::test]
+async fn find_existing_names_paginates_on_matches() {
     let server = MockServer::start().await;
     let bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
         Arc::new(std::sync::Mutex::new(vec![]));
@@ -67,8 +130,14 @@ async fn list_existing_names_paginates() {
         database_id: "db1".into(),
     };
     let client = NotionClient::with_base_url(ctx, server.uri()).unwrap();
-    let names = client.list_existing_names(&|_| {}).await.unwrap();
-    assert_eq!(names.len(), 2);
+    let names = client
+        .find_existing_names(&["a.png", "b.png"], &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        ["a.png", "b.png"].into_iter().map(str::to_owned).collect()
+    );
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
